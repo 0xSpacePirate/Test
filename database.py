@@ -1,14 +1,26 @@
+from key_manager import load_credentials
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
-from config import CHROMA_PERSIST_DIRECTORY, COLLECTION_NAME, OPENAI_API_KEY
+from langchain_chroma import Chroma
+from config import CHROMA_PERSIST_DIRECTORY, COLLECTION_NAME
 
 
 def get_vector_store():
-    """Initializes and returns a persistent Chroma vector store."""
-    if not OPENAI_API_KEY:
-        raise ValueError("OPENAI_API_KEY is not set in the environment.")
+    """
+    Initializes the vector store, loading both the API key and Project ID
+    and passing them correctly to the OpenAI client.
+    """
+    api_key, project_id = load_credentials()
 
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+    if not api_key or not project_id:
+        raise ValueError("OpenAI credentials not found. Please set them in the Settings menu.")
+
+    embeddings = OpenAIEmbeddings(
+        model="text-embedding-3-small",
+        openai_api_key=api_key,
+        default_headers={
+            "OpenAI-Project": project_id
+        }
+    )
 
     vector_store = Chroma(
         collection_name=COLLECTION_NAME,
@@ -24,17 +36,13 @@ def get_indexed_files():
     """
     try:
         vector_store = get_vector_store()
-        # The 'get' method with no IDs/where clause returns all entries.
         existing_entries = vector_store.get()
 
-        # Check if metadata exists and is a list
         if "metadatas" in existing_entries and existing_entries["metadatas"]:
-            # Extract the 'source' from each metadata dictionary
             return {metadata['source'] for metadata in existing_entries["metadatas"] if 'source' in metadata}
         else:
             return set()
 
-    except Exception as e:
-        # This can happen if the DB doesn't exist yet, which is fine on first run.
-        print(f"Could not get indexed files (this is normal on first run): {e}")
+    except Exception:
         return set()
+    

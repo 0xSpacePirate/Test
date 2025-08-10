@@ -4,7 +4,12 @@ langchain-community
 langchain-openai
 langchain-chroma
 chromadb
-unstructured[doc,docx]
 python-dotenv==1.0.1
-tiktoken==0.7.0
+tiktoken
+cryptography
+
+# Install the core unstructured library PLUS the specific dependencies for Word docs
+unstructured
+python-docx
+olefile
 tkinter

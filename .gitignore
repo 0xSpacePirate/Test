@@ -76,3 +76,11 @@ venv/
 ENV/
 env.bak
 venv.bak
+
+# DBs
+keyword_search.db
+local_chroma_db/*
+
+# api keys
+app.key
+config.ini
