@@ -1,3 +1,7 @@
+import logging
+from logger_setup import setup_global_logging
+setup_global_logging()
+
 import tkinter as tk
 from tkinter import scrolledtext, messagebox, filedialog
 import threading
@@ -39,6 +43,7 @@ class ApiKeyWindow(tk.Toplevel):
             self.credentials_saved = True
             self.destroy()
         else:
+            logging.error("User entered invalid credentials.")
             messagebox.showerror("Invalid Credentials",
                                  "Please ensure your API Key starts with 'sk-' and your Project ID starts with 'proj_'.",
                                  parent=self)
@@ -53,14 +58,12 @@ class App(tk.Tk):
         self.source_directory = None
         self.gui_queue = queue.Queue()
 
-        # --- THIS IS THE RESTORED MENU BAR CODE ---
         self.menu_bar = tk.Menu(self)
         self.config(menu=self.menu_bar)
 
         settings_menu = tk.Menu(self.menu_bar, tearoff=0)
         self.menu_bar.add_cascade(label="Settings", menu=settings_menu)
         settings_menu.add_command(label="Set API Credentials...", command=self.open_api_key_window)
-        # --- END OF RESTORED CODE ---
 
         dir_frame = tk.Frame(self)
         dir_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
@@ -131,6 +134,7 @@ class App(tk.Tk):
             self.dir_label.config(text=f"Document Folder: {self.source_directory}")
             self.check_api_key_and_toggle_buttons()
             self.update_status(f"Directory selected. Ready to index files.")
+            logging.info(f"User selected directory: {path}")
 
     def initial_setup(self):
         create_keyword_db()
@@ -144,6 +148,7 @@ class App(tk.Tk):
                 self.index_button.config(state=tk.NORMAL)
             self.update_status("Ready.")
         else:
+            logging.error("API credentials not found. Semantic features disabled.")
             self.semantic_search_button.config(state=tk.DISABLED)
             self.index_button.config(state=tk.DISABLED)
             self.update_status("API Credentials not set. Please use the Settings menu.")
@@ -190,7 +195,7 @@ class App(tk.Tk):
             return
         self.toggle_buttons(False)
         self.update_status("Starting unified indexing process...")
-        threading.Thread(target=self.run_indexing, daemon=True).start()
+        threading.Thread(target=self.run_indexing, daemon=True, name="IndexingThread").start()
 
     def run_indexing(self):
         def status_callback(text):
@@ -199,6 +204,7 @@ class App(tk.Tk):
         try:
             process_and_ingest_documents(status_callback, self.source_directory)
         except Exception as e:
+            logging.error("An exception occurred in the indexing thread.", exc_info=True)
             status_callback(f"An unexpected error during indexing: {e}")
         finally:
             self.gui_queue.put(("enable_buttons", True))
@@ -209,7 +215,7 @@ class App(tk.Tk):
         self.toggle_buttons(False)
         self.update_status("Performing semantic search...")
         self.clear_results()
-        threading.Thread(target=self.run_semantic_search, args=(query,), daemon=True).start()
+        threading.Thread(target=self.run_semantic_search, args=(query,), daemon=True, name="SemanticSearchThread").start()
 
     def run_semantic_search(self, query):
         def status_callback(text):
@@ -219,9 +225,11 @@ class App(tk.Tk):
             results = perform_semantic_search(query, status_callback)
             self.gui_queue.put(("semantic_results", results))
         except Exception as e:
+            logging.error("An exception occurred in the semantic search thread.", exc_info=True)
             status_callback(f"Error during semantic search: {e}")
         finally:
             self.gui_queue.put(("enable_buttons", True))
+
 
     def start_keyword_search_thread(self, event=None):
         query = self.keyword_search_entry.get()
@@ -229,19 +237,22 @@ class App(tk.Tk):
         self.toggle_buttons(False)
         self.update_status("Performing keyword search...")
         self.clear_results()
-        threading.Thread(target=self.run_keyword_search, args=(query,), daemon=True).start()
+        threading.Thread(target=self.run_keyword_search, args=(query,), daemon=True, name="KeywordSearchThread").start()
 
     def run_keyword_search(self, query):
         try:
             results = perform_keyword_search(query)
             self.gui_queue.put(("keyword_results", results))
         except Exception as e:
+            logging.error("An exception occurred in the keyword search thread.", exc_info=True)
             self.gui_queue.put(("status", f"Error during keyword search: {e}"))
         finally:
             self.gui_queue.put(("enable_buttons", True))
 
+
     def display_semantic_results(self, results):
         self.results_text.config(state='normal')
+        self.results_text.delete('1.0', tk.END)
         if not results:
             self.results_text.insert(tk.END, "No relevant documents found for semantic search.")
         else:
@@ -259,6 +270,7 @@ class App(tk.Tk):
 
     def display_keyword_results(self, results):
         self.results_text.config(state='normal')
+        self.results_text.delete('1.0', tk.END)
         if not results:
             self.results_text.insert(tk.END, "No documents found containing that keyword/phrase.")
         else:
@@ -270,5 +282,9 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    app = App()
-    app.mainloop()
+    try:
+        app = App()
+        app.mainloop()
+    except Exception:
+        logging.critical("A fatal error occurred in the main application loop.", exc_info=True)
+        messagebox.showerror("Fatal Error", "A critical error occurred. Please check the log file for details.")
