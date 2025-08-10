@@ -7,3 +7,4 @@ chromadb
 unstructured[doc,docx]
 python-dotenv==1.0.1
 tiktoken==0.7.0
+tkinter
