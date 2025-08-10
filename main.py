@@ -6,7 +6,42 @@ import queue
 from document_processor import process_and_ingest_documents
 from search_engine import perform_search as perform_semantic_search
 from keyword_search_engine import create_db as create_keyword_db, search_sqlite as perform_keyword_search
-from config import OPENAI_API_KEY
+from key_manager import save_credentials, load_credentials
+
+
+class ApiKeyWindow(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Set OpenAI Credentials")
+        self.geometry("450x150")
+        self.transient(parent)
+        self.grab_set()
+
+        self.credentials_saved = False
+
+        tk.Label(self, text="Enter your OpenAI API Key (starts with 'sk-'):").pack(pady=(10, 0))
+        self.key_entry = tk.Entry(self, width=60, show="*")
+        self.key_entry.pack(padx=10)
+
+        tk.Label(self, text="Enter your OpenAI Project ID (starts with 'proj_'):").pack(pady=(10, 0))
+        self.project_id_entry = tk.Entry(self, width=60)
+        self.project_id_entry.pack(padx=10)
+
+        save_button = tk.Button(self, text="Save Credentials", command=self.save_and_close)
+        save_button.pack(pady=10)
+
+    def save_and_close(self):
+        api_key = self.key_entry.get().strip()
+        project_id = self.project_id_entry.get().strip()
+
+        if api_key.startswith("sk-") and project_id.startswith("proj_"):
+            save_credentials(api_key, project_id)
+            self.credentials_saved = True
+            self.destroy()
+        else:
+            messagebox.showerror("Invalid Credentials",
+                                 "Please ensure your API Key starts with 'sk-' and your Project ID starts with 'proj_'.",
+                                 parent=self)
 
 
 class App(tk.Tk):
@@ -18,7 +53,15 @@ class App(tk.Tk):
         self.source_directory = None
         self.gui_queue = queue.Queue()
 
-        # --- Directory Selection Frame ---
+        # --- THIS IS THE RESTORED MENU BAR CODE ---
+        self.menu_bar = tk.Menu(self)
+        self.config(menu=self.menu_bar)
+
+        settings_menu = tk.Menu(self.menu_bar, tearoff=0)
+        self.menu_bar.add_cascade(label="Settings", menu=settings_menu)
+        settings_menu.add_command(label="Set API Credentials...", command=self.open_api_key_window)
+        # --- END OF RESTORED CODE ---
+
         dir_frame = tk.Frame(self)
         dir_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
         self.dir_label = tk.Label(dir_frame, text="Document Folder: (None Selected)")
@@ -29,36 +72,28 @@ class App(tk.Tk):
                                       state=tk.DISABLED)
         self.index_button.pack(side=tk.LEFT, padx=5)
 
-        # --- Main Layout Frame ---
         main_frame = tk.Frame(self)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        # --- Semantic Search Frame ---
         semantic_frame = tk.Frame(main_frame, relief=tk.GROOVE, borderwidth=2, padx=5, pady=5)
         semantic_frame.pack(fill=tk.X, pady=(0, 10))
         tk.Label(semantic_frame, text="Semantic Search (finds by meaning):").pack(anchor=tk.W)
         self.semantic_search_entry = tk.Entry(semantic_frame, width=70)
         self.semantic_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        # --- THIS IS THE FIX (Part 1) ---
-        # Bind the Enter key specifically to the semantic search method
         self.semantic_search_entry.bind("<Return>", self.start_semantic_search_thread)
         self.semantic_search_button = tk.Button(semantic_frame, text="Search",
                                                 command=self.start_semantic_search_thread)
         self.semantic_search_button.pack(side=tk.LEFT, padx=(5, 0))
 
-        # --- Keyword Search Frame ---
         keyword_frame = tk.Frame(main_frame, relief=tk.GROOVE, borderwidth=2, padx=5, pady=5)
         keyword_frame.pack(fill=tk.X)
         tk.Label(keyword_frame, text="Keyword Search (finds exact words/phrases):").pack(anchor=tk.W)
         self.keyword_search_entry = tk.Entry(keyword_frame, width=70)
         self.keyword_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        # --- THIS IS THE FIX (Part 2) ---
-        # Bind the Enter key specifically to the keyword search method
         self.keyword_search_entry.bind("<Return>", self.start_keyword_search_thread)
         self.keyword_search_button = tk.Button(keyword_frame, text="Search", command=self.start_keyword_search_thread)
         self.keyword_search_button.pack(side=tk.LEFT, padx=(5, 0))
 
-        # --- Results Frame ---
         results_frame = tk.Frame(main_frame)
         results_frame.pack(fill=tk.BOTH, expand=True, pady=10)
         self.results_text = scrolledtext.ScrolledText(results_frame, wrap=tk.WORD, state='disabled',
@@ -66,16 +101,23 @@ class App(tk.Tk):
         self.results_text.pack(fill=tk.BOTH, expand=True)
         self.configure_tags()
 
-        # --- Status Bar ---
-        self.status_bar = tk.Label(self, text="Welcome! Please select a document directory to begin.", bd=1,
+        self.status_bar = tk.Label(self, text="Welcome! Please set your API credentials via the Settings menu.", bd=1,
                                    relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
         self.after(100, self.process_queue)
-        self.initial_setup()
+        self.after(150, self.initial_setup)
+
+    def open_api_key_window(self):
+        api_window = ApiKeyWindow(self)
+        self.wait_window(api_window)
+
+        if api_window.credentials_saved:
+            messagebox.showinfo("Credentials Saved",
+                                "Credentials have been saved successfully. You can now use the Indexing and Semantic Search features.")
+            self.check_api_key_and_toggle_buttons()
 
     def configure_tags(self):
-        """Configure styles for the results text widget."""
         self.results_text.tag_configure("header", font=("TkDefaultFont", 12, "bold", "underline"))
         self.results_text.tag_configure("source_label", font=("TkDefaultFont", 10, "italic"))
         self.results_text.tag_configure("source_path", font=("TkDefaultFont", 10, "bold"))
@@ -87,16 +129,24 @@ class App(tk.Tk):
         if path:
             self.source_directory = path
             self.dir_label.config(text=f"Document Folder: {self.source_directory}")
-            self.index_button.config(state=tk.NORMAL)
+            self.check_api_key_and_toggle_buttons()
             self.update_status(f"Directory selected. Ready to index files.")
 
     def initial_setup(self):
-        """Perform initial checks and DB setup on startup."""
-        if not OPENAI_API_KEY or "sk-..." in OPENAI_API_KEY:
-            messagebox.showerror("Configuration Error", "OpenAI API Key is not configured.")
-            self.destroy()
         create_keyword_db()
-        self.update_status("Ready.")
+        self.check_api_key_and_toggle_buttons()
+
+    def check_api_key_and_toggle_buttons(self):
+        api_key, project_id = load_credentials()
+        if api_key and project_id:
+            self.semantic_search_button.config(state=tk.NORMAL)
+            if self.source_directory:
+                self.index_button.config(state=tk.NORMAL)
+            self.update_status("Ready.")
+        else:
+            self.semantic_search_button.config(state=tk.DISABLED)
+            self.index_button.config(state=tk.DISABLED)
+            self.update_status("API Credentials not set. Please use the Settings menu.")
 
     def process_queue(self):
         try:
@@ -117,12 +167,12 @@ class App(tk.Tk):
 
     def toggle_buttons(self, enabled):
         state = tk.NORMAL if enabled else tk.DISABLED
-        self.semantic_search_button.config(state=state)
         self.keyword_search_button.config(state=state)
         self.browse_button.config(state=state)
-        if self.source_directory and enabled:
-            self.index_button.config(state=tk.NORMAL)
+        if enabled:
+            self.check_api_key_and_toggle_buttons()
         else:
+            self.semantic_search_button.config(state=tk.DISABLED)
             self.index_button.config(state=tk.DISABLED)
 
     def update_status(self, text):
@@ -153,7 +203,6 @@ class App(tk.Tk):
         finally:
             self.gui_queue.put(("enable_buttons", True))
 
-    # The 'event=None' parameter is required for Tkinter event bindings
     def start_semantic_search_thread(self, event=None):
         query = self.semantic_search_entry.get()
         if not query.strip(): return
@@ -174,7 +223,6 @@ class App(tk.Tk):
         finally:
             self.gui_queue.put(("enable_buttons", True))
 
-    # The 'event=None' parameter is required for Tkinter event bindings
     def start_keyword_search_thread(self, event=None):
         query = self.keyword_search_entry.get()
         if not query.strip(): return
