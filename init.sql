@@ -1,20 +1,3 @@
-DO $$
-BEGIN
-   -- Create postgres superuser if it doesn't exist
-   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'postgres') THEN
-      CREATE ROLE postgres WITH LOGIN PASSWORD 'postgres' SUPERUSER CREATEDB CREATEROLE REPLICATION;
-      RAISE NOTICE 'Created postgres superuser';
-   END IF;
-   
-   -- You can also create additional superusers here
-   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'admin') THEN
-      CREATE ROLE admin WITH LOGIN PASSWORD 'admin123' SUPERUSER CREATEDB CREATEROLE;
-      RAISE NOTICE 'Created admin superuser';
-   END IF;
-END
-$$;
-
-
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS public.documents (
