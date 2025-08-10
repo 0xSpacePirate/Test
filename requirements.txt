@@ -12,3 +12,4 @@ cryptography
 unstructured
 python-docx
 olefile
+tkinter
