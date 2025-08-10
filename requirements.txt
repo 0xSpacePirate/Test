@@ -1,0 +1,9 @@
+langchain
+langchain-core
+langchain-community
+langchain-openai
+langchain-chroma
+chromadb
+unstructured[doc,docx]
+python-dotenv==1.0.1
+tiktoken==0.7.0

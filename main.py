@@ -1,280 +1,226 @@
-import os
-import sys
-import sqlite3
-import platform
-import warnings
+import tkinter as tk
+from tkinter import scrolledtext, messagebox, filedialog
+import threading
+import queue
+# Import from all our modules
+from document_processor import process_and_ingest_documents
+from search_engine import perform_search as perform_semantic_search
+from keyword_search_engine import create_db as create_keyword_db, search_sqlite as perform_keyword_search
+from config import OPENAI_API_KEY
 
-# Suppress warnings from libraries to keep the output clean
-warnings.filterwarnings("ignore", category=UserWarning)
 
-def get_system_info():
-    """Get system information for troubleshooting."""
-    system = platform.system()
-    return system
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Universal Document Search")
+        self.geometry("800x700")
 
-def try_extraction_libraries(filepath):
-    """
-    Tries a series of Python libraries to extract text from a document.
-    'unstructured' is prioritized as it's generally the most effective.
-    """
-    extracted_content = None
-    try:
-        from unstructured.partition.auto import partition
-        elements = partition(filename=filepath)
-        content = "\n\n".join([str(el) for el in elements])
-        if content and content.strip():
-            extracted_content = content
-        else:
-            print("✗ 'unstructured' returned empty content.")
-    except Exception as e:
-        if "pandoc" in str(e).lower():
-            print("✗ unstructured ERROR: Pandoc not found. Please install it from pandoc.org.")
-        else:
-            print(f"✗ unstructured ERROR: {e}")
-            
-    if not extracted_content:
-        print(" -> Trying 'textract' as a fallback...")
+        self.source_directory = None
+        self.gui_queue = queue.Queue()
+
+        # --- Directory Selection Frame ---
+        dir_frame = tk.Frame(self)
+        dir_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        self.dir_label = tk.Label(dir_frame, text="Document Folder: (None Selected)")
+        self.dir_label.pack(side=tk.LEFT, padx=(0, 5))
+        self.browse_button = tk.Button(dir_frame, text="Browse...", command=self.select_directory)
+        self.browse_button.pack(side=tk.LEFT)
+        self.index_button = tk.Button(dir_frame, text="Index New Files", command=self.start_indexing_thread,
+                                      state=tk.DISABLED)
+        self.index_button.pack(side=tk.LEFT, padx=5)
+
+        # --- Main Layout Frame ---
+        main_frame = tk.Frame(self)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # --- Semantic Search Frame ---
+        semantic_frame = tk.Frame(main_frame, relief=tk.GROOVE, borderwidth=2, padx=5, pady=5)
+        semantic_frame.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(semantic_frame, text="Semantic Search (finds by meaning):").pack(anchor=tk.W)
+        self.semantic_search_entry = tk.Entry(semantic_frame, width=70)
+        self.semantic_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # --- THIS IS THE FIX (Part 1) ---
+        # Bind the Enter key specifically to the semantic search method
+        self.semantic_search_entry.bind("<Return>", self.start_semantic_search_thread)
+        self.semantic_search_button = tk.Button(semantic_frame, text="Search",
+                                                command=self.start_semantic_search_thread)
+        self.semantic_search_button.pack(side=tk.LEFT, padx=(5, 0))
+
+        # --- Keyword Search Frame ---
+        keyword_frame = tk.Frame(main_frame, relief=tk.GROOVE, borderwidth=2, padx=5, pady=5)
+        keyword_frame.pack(fill=tk.X)
+        tk.Label(keyword_frame, text="Keyword Search (finds exact words/phrases):").pack(anchor=tk.W)
+        self.keyword_search_entry = tk.Entry(keyword_frame, width=70)
+        self.keyword_search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # --- THIS IS THE FIX (Part 2) ---
+        # Bind the Enter key specifically to the keyword search method
+        self.keyword_search_entry.bind("<Return>", self.start_keyword_search_thread)
+        self.keyword_search_button = tk.Button(keyword_frame, text="Search", command=self.start_keyword_search_thread)
+        self.keyword_search_button.pack(side=tk.LEFT, padx=(5, 0))
+
+        # --- Results Frame ---
+        results_frame = tk.Frame(main_frame)
+        results_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        self.results_text = scrolledtext.ScrolledText(results_frame, wrap=tk.WORD, state='disabled',
+                                                      font=("TkDefaultFont", 10))
+        self.results_text.pack(fill=tk.BOTH, expand=True)
+        self.configure_tags()
+
+        # --- Status Bar ---
+        self.status_bar = tk.Label(self, text="Welcome! Please select a document directory to begin.", bd=1,
+                                   relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        self.after(100, self.process_queue)
+        self.initial_setup()
+
+    def configure_tags(self):
+        """Configure styles for the results text widget."""
+        self.results_text.tag_configure("header", font=("TkDefaultFont", 12, "bold", "underline"))
+        self.results_text.tag_configure("source_label", font=("TkDefaultFont", 10, "italic"))
+        self.results_text.tag_configure("source_path", font=("TkDefaultFont", 10, "bold"))
+        self.results_text.tag_configure("highlighted_chunk", background="#E0FFE0")
+        self.results_text.tag_configure("keyword_result", font=("TkDefaultFont", 11))
+
+    def select_directory(self):
+        path = filedialog.askdirectory(title="Select Folder Containing .doc or .docx Files")
+        if path:
+            self.source_directory = path
+            self.dir_label.config(text=f"Document Folder: {self.source_directory}")
+            self.index_button.config(state=tk.NORMAL)
+            self.update_status(f"Directory selected. Ready to index files.")
+
+    def initial_setup(self):
+        """Perform initial checks and DB setup on startup."""
+        if not OPENAI_API_KEY or "sk-..." in OPENAI_API_KEY:
+            messagebox.showerror("Configuration Error", "OpenAI API Key is not configured.")
+            self.destroy()
+        create_keyword_db()
+        self.update_status("Ready.")
+
+    def process_queue(self):
         try:
-            import textract
-            byte_content = textract.process(filepath)
-            content = byte_content.decode('utf-8', errors='ignore')
-            if content and content.strip():
-                extracted_content = content
-            else:
-                print("✗ 'textract' returned empty content.")
-        except Exception as e:
-            print(f"✗ textract ERROR: {e}")
+            while True:
+                msg_type, data = self.gui_queue.get_nowait()
+                if msg_type == "status":
+                    self.update_status(data)
+                elif msg_type == "semantic_results":
+                    self.display_semantic_results(data)
+                elif msg_type == "keyword_results":
+                    self.display_keyword_results(data)
+                elif msg_type == "enable_buttons":
+                    self.toggle_buttons(True)
+        except queue.Empty:
+            pass
+        finally:
+            self.after(100, self.process_queue)
 
-    return extracted_content
-
-def manual_dependency_guide():
-    """Provides a guide for installing the necessary external programs."""
-    print("\n" + "="*60)
-    print("AUTOMATIC EXTRACTION FAILED")
-    print("="*60)
-    print("Please ensure the required dependencies are installed:")
-    print("\nOPTION 1 (Recommended): INSTALL PANDOC")
-    print("1. Go to https://pandoc.org/installing.html and run the Windows installer.")
-    print("2. In your terminal, run: pip install \"unstructured[doc]\"")
-    print("\nAfter installation, run this script again.")
-    print("="*60)
-
-def extract_doc_text(filepath):
-    """
-    Extracts text from a single .doc file. Returns None on failure.
-    """
-    if not os.path.exists(filepath):
-        print(f"  -> File not found: {filepath}")
-        return None
-        
-    content = try_extraction_libraries(filepath)
-
-    if content and content.strip():
-        return content.replace('\x00', '').strip()
-    return None
-
-def create_db(db_path='documents.db'):
-    """Creates the database tables needed for searching and tracking indexed files."""
-    try:
-        conn = sqlite3.connect(db_path)
-        c = conn.cursor()
-        # Table for full-text search content
-        c.execute('''
-        CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(
-            filename,
-            content,
-            tokenize = 'porter unicode61'
-        );
-        ''')
-        # Table to track which file paths have already been indexed
-        c.execute("CREATE TABLE IF NOT EXISTS indexed_files (path TEXT PRIMARY KEY)")
-        conn.commit()
-        conn.close()
-        print(f"Database '{db_path}' is ready.")
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        sys.exit(1)
-
-def get_indexed_files(db_path):
-    """
-    --- THIS IS A KEY FUNCTION ---
-    Queries the database and returns a set of all file paths that have been processed.
-    """
-    try:
-        conn = sqlite3.connect(db_path)
-        c = conn.cursor()
-        c.execute("SELECT path FROM indexed_files")
-        # Using a set {} gives very fast lookups
-        indexed = {row[0] for row in c.fetchall()}
-        conn.close()
-        return indexed
-    except sqlite3.Error as e:
-        print(f"Database error checking indexed files: {e}")
-        return set()
-
-def insert_file_to_sqlite(filepath, content, db_path='documents.db'):
-    """
-    --- THIS IS A KEY FUNCTION ---
-    Inserts file content and also records the file's path in the 'indexed_files' table.
-    """
-    if not content or not content.strip():
-        print("  -> Content is empty. Skipping database insertion.")
-        return False
-
-    try:
-        conn = sqlite3.connect(db_path)
-        c = conn.cursor()
-        # Insert content for searching
-        c.execute('INSERT OR REPLACE INTO documents (filename, content) VALUES (?, ?)', (os.path.basename(filepath), content))
-        # MARK the file as indexed by inserting its path.
-        c.execute('INSERT OR REPLACE INTO indexed_files (path) VALUES (?)', (filepath,))
-        conn.commit()
-        conn.close()
-        return True
-    except sqlite3.Error as e:
-        print(f"  -> FAILED to insert into database: {e}")
-        return False
-
-def search_sqlite(query, db_path='documents.db'):
-    """Performs a full-text search on the 'content' column of the database."""
-    results = []
-    try:
-        conn = sqlite3.connect(db_path)
-        c = conn.cursor()
-        c.execute("SELECT filename FROM documents WHERE documents MATCH ?", (f'"{query}"',))
-        results = c.fetchall()
-        conn.close()
-    except sqlite3.Error as e:
-        print(f"Search error: {e}")
-    return [filename for (filename,) in results]
-
-def start_search_loop(db_path='documents.db'):
-    """Starts the interactive search loop."""
-    print("\n" + "="*50)
-    print("🔍 ALL DOCUMENTS INDEXED. SEARCH IS READY.")
-    print("="*50)
-    print("Type any word or phrase (e.g., 'report', 'български').")
-    print("Type 'exit' to quit.")
-    print("="*50)
-
-    while True:
-        q = input("\n🔍 Search: ").strip()
-        if not q:
-            continue
-        if q.lower() == 'exit':
-            print("Goodbye!")
-            break
-
-        print(f"\nSearching for: '{q}'")
-        found_files = search_sqlite(q, db_path)
-
-        if found_files:
-            print(f"\n✓ Found '{q}' in the following files:")
-            for i, filename in enumerate(found_files, 1):
-                print(f"  {i}. {filename}")
+    def toggle_buttons(self, enabled):
+        state = tk.NORMAL if enabled else tk.DISABLED
+        self.semantic_search_button.config(state=state)
+        self.keyword_search_button.config(state=state)
+        self.browse_button.config(state=state)
+        if self.source_directory and enabled:
+            self.index_button.config(state=tk.NORMAL)
         else:
-            print("❌ No matching documents found.")
+            self.index_button.config(state=tk.DISABLED)
 
-def process_directory(source_directory, db_path):
-    """
-    Finds all .doc and .docx files, and only processes the ones that are new.
-    """
-    if not os.path.isdir(source_directory):
-        print(f"Error: Directory '{source_directory}' not found.")
-        return 0
+    def update_status(self, text):
+        self.status_bar.config(text=text)
+        self.update_idletasks()
 
-    print(f"Scanning for documents in '{source_directory}'...")
-    
-    files_to_process = []
-    for root, _, files in os.walk(source_directory):
-        for file in files:
-            if file.lower().endswith(('.doc', '.docx')):
-                # Get the full, absolute path for a unique identifier
-                files_to_process.append(os.path.abspath(os.path.join(root, file)))
-    
-    if not files_to_process:
-        print("No .doc or .docx files found in the directory.")
-        return 0
-        
-    # --- LOGIC TO AVOID RE-PROCESSING ---
-    # 1. Get the list of files already in the database.
-    already_indexed = get_indexed_files(db_path)
-    
-    # 2. Subtract the 'already_indexed' set from the 'files_to_process' list.
-    new_files = [f for f in files_to_process if f not in already_indexed]
-    # --- END OF LOGIC ---
+    def clear_results(self):
+        self.results_text.config(state='normal')
+        self.results_text.delete('1.0', tk.END)
+        self.results_text.config(state='disabled')
 
-    if not new_files:
-        print(f"All {len(files_to_process)} documents are already indexed. Nothing new to add.")
-        return len(files_to_process)
+    def start_indexing_thread(self):
+        if not self.source_directory:
+            messagebox.showwarning("Directory Not Set", "Please select a directory first.")
+            return
+        self.toggle_buttons(False)
+        self.update_status("Starting unified indexing process...")
+        threading.Thread(target=self.run_indexing, daemon=True).start()
 
-    print(f"Found {len(new_files)} new documents to process.")
-    
-    successful_imports = 0
-    failed_imports = 0
-    
-    for i, filepath in enumerate(new_files):
-        print("\n" + "-"*60)
-        print(f"Processing file {i+1} of {len(new_files)}: {os.path.basename(filepath)}")
-        
-        content = extract_doc_text(filepath)
-        
-        if content:
-            if insert_file_to_sqlite(filepath, content, db_path):
-                print(f"  -> Successfully indexed.")
-                successful_imports += 1
-            else:
-                failed_imports += 1
-        else:
-            print(f"  -> FAILED to extract text.")
-            failed_imports += 1
-    
-    print("\n" + "="*60)
-    print("BATCH PROCESSING COMPLETE")
-    print(f"Successfully Indexed: {successful_imports}")
-    print(f"Failed: {failed_imports}")
-    print("="*60)
-    
-    return len(get_indexed_files(db_path))
+    def run_indexing(self):
+        def status_callback(text):
+            self.gui_queue.put(("status", text))
 
-def main():
-    """Main function to set up and run the application."""
-    print("Universal .doc File Text Extraction and Search (Batch Mode)")
-    print("=" * 60)
-    get_system_info()
-    
-    source_directory = 'documents' # Changed from 'test' for clarity
-    db_path = 'document_search.db'
-    
-    if not os.path.exists(source_directory):
-        print(f"Creating a sample '{source_directory}/' folder for you...")
-        os.makedirs(source_directory)
         try:
-            from docx import Document
-            doc1 = Document()
-            doc1.add_paragraph("This is the first document. It contains the word 'alpha'.")
-            doc1.add_paragraph("Това е първият документ на български език.")
-            doc1.save(os.path.join(source_directory, 'report_alpha.doc'))
-            doc2 = Document()
-            doc2.add_paragraph("This is the second file, mentioning 'beta'.")
-            doc2.save(os.path.join(source_directory, 'summary_beta.docx'))
-            print("Created two sample documents inside the folder.")
-        except ImportError:
-            print(f"Could not create dummy files: 'python-docx' not installed. Please manually add .doc files to the '{source_directory}' folder.")
+            process_and_ingest_documents(status_callback, self.source_directory)
         except Exception as e:
-            print(f"An error occurred while creating dummy files: {e}")
-            
-    create_db(db_path)
+            status_callback(f"An unexpected error during indexing: {e}")
+        finally:
+            self.gui_queue.put(("enable_buttons", True))
 
-    total_indexed_docs = process_directory(source_directory, db_path)
+    # The 'event=None' parameter is required for Tkinter event bindings
+    def start_semantic_search_thread(self, event=None):
+        query = self.semantic_search_entry.get()
+        if not query.strip(): return
+        self.toggle_buttons(False)
+        self.update_status("Performing semantic search...")
+        self.clear_results()
+        threading.Thread(target=self.run_semantic_search, args=(query,), daemon=True).start()
 
-    if total_indexed_docs > 0:
-        start_search_loop(db_path)
-    else:
-        print("\nNo documents could be indexed. The search cannot start.")
-        manual_dependency_guide()
-        sys.exit(1)
+    def run_semantic_search(self, query):
+        def status_callback(text):
+            self.gui_queue.put(("status", text))
+
+        try:
+            results = perform_semantic_search(query, status_callback)
+            self.gui_queue.put(("semantic_results", results))
+        except Exception as e:
+            status_callback(f"Error during semantic search: {e}")
+        finally:
+            self.gui_queue.put(("enable_buttons", True))
+
+    # The 'event=None' parameter is required for Tkinter event bindings
+    def start_keyword_search_thread(self, event=None):
+        query = self.keyword_search_entry.get()
+        if not query.strip(): return
+        self.toggle_buttons(False)
+        self.update_status("Performing keyword search...")
+        self.clear_results()
+        threading.Thread(target=self.run_keyword_search, args=(query,), daemon=True).start()
+
+    def run_keyword_search(self, query):
+        try:
+            results = perform_keyword_search(query)
+            self.gui_queue.put(("keyword_results", results))
+        except Exception as e:
+            self.gui_queue.put(("status", f"Error during keyword search: {e}"))
+        finally:
+            self.gui_queue.put(("enable_buttons", True))
+
+    def display_semantic_results(self, results):
+        self.results_text.config(state='normal')
+        if not results:
+            self.results_text.insert(tk.END, "No relevant documents found for semantic search.")
+        else:
+            num_matches_str = f"Found {len(results)} relevant chunks (Semantic Search)\n\n"
+            self.results_text.insert(tk.END, num_matches_str, "header")
+            for i, doc in enumerate(results):
+                source_path = doc.metadata.get('source', 'Unknown')
+                self.results_text.insert(tk.END, f"Source File: ", "source_label")
+                self.results_text.insert(tk.END, f"{source_path}\n", "source_path")
+                self.results_text.insert(tk.END, f"Matching Chunk:\n", "source_label")
+                self.results_text.insert(tk.END, f"{doc.page_content}\n", "highlighted_chunk")
+                if i < len(results) - 1:
+                    self.results_text.insert(tk.END, "\n" + "-" * 80 + "\n\n")
+        self.results_text.config(state='disabled')
+
+    def display_keyword_results(self, results):
+        self.results_text.config(state='normal')
+        if not results:
+            self.results_text.insert(tk.END, "No documents found containing that keyword/phrase.")
+        else:
+            num_matches_str = f"Found {len(results)} files (Keyword Search)\n\n"
+            self.results_text.insert(tk.END, num_matches_str, "header")
+            for i, path in enumerate(results):
+                self.results_text.insert(tk.END, f"{i + 1}. {path}\n", "keyword_result")
+        self.results_text.config(state='disabled')
 
 
 if __name__ == "__main__":
-    main()
+    app = App()
+    app.mainloop()
